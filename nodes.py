@@ -102,8 +102,8 @@ class Qwen2VL:
             # Define min_pixels and max_pixels:
             # Images will be resized to maintain their aspect ratio
             # within the range of min_pixels and max_pixels.
-            min_pixels = 224 * 224
-            max_pixels = 2048 * 2048
+            min_pixels = 256*28*28
+            max_pixels = 1024*28*28 
 
             self.processor = AutoProcessor.from_pretrained(
                 self.model_checkpoint,
