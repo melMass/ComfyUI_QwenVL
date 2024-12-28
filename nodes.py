@@ -81,9 +81,6 @@ class Qwen2VL:
         seed,
         image=None,
     ):
-        if not text.strip():
-            return ("Error: Text input is empty.",)
-
         if seed != -1:
             torch.manual_seed(seed)
         model_id = f"qwen/{model}"
