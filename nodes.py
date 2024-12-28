@@ -2,7 +2,7 @@ import os
 import torch
 from transformers import (
     Qwen2VLForConditionalGeneration,
-    AutoModelForCausalLM, 
+    AutoModelForCausalLM,
     AutoTokenizer,
     AutoProcessor,
     BitsAndBytesConfig,
@@ -13,7 +13,7 @@ import numpy as np
 import folder_paths
 
 
-def tensor_to_pil(image_tensor, batch_index=0)->Image:
+def tensor_to_pil(image_tensor, batch_index=0) -> Image:
     # Convert tensor of shape [batch, height, width, channels] at the batch_index to PIL Image
     image_tensor = image_tensor[batch_index].unsqueeze(0)
     i = 255.0 * image_tensor.cpu().numpy()
@@ -81,6 +81,9 @@ class Qwen2VL:
         seed,
         image=None,
     ):
+        if not text.strip():
+            return ("Error: Text input is empty.",)
+
         if seed != -1:
             torch.manual_seed(seed)
         model_id = f"qwen/{model}"
@@ -91,6 +94,7 @@ class Qwen2VL:
 
         if not os.path.exists(self.model_checkpoint):
             from huggingface_hub import snapshot_download
+
             snapshot_download(
                 repo_id=model_id,
                 local_dir=self.model_checkpoint,
@@ -98,8 +102,16 @@ class Qwen2VL:
             )
 
         if self.processor is None:
+            # Define min_pixels and max_pixels:
+            # Images will be resized to maintain their aspect ratio
+            # within the range of min_pixels and max_pixels.
+            min_pixels = 224 * 224
+            max_pixels = 2048 * 2048
+
             self.processor = AutoProcessor.from_pretrained(
-                self.model_checkpoint
+                self.model_checkpoint,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
             )
 
         if self.model is None:
@@ -125,13 +137,14 @@ class Qwen2VL:
         with torch.no_grad():
             if torch.is_tensor(image):
                 pil_image = tensor_to_pil(image)
+
                 messages = [
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "image",
-                                "image": pil_image, 
+                                "image": pil_image,
                             },
                             {"type": "text", "text": text},
                         ],
@@ -159,24 +172,29 @@ class Qwen2VL:
                 return_tensors="pt",
             ).to("cuda")
 
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-            generated_ids_trimmed = [
-                out_ids[len(in_ids) :]
-                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            result = self.processor.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-                temperature=temperature,
-            )
+            try:
+                generated_ids = self.model.generate(
+                    **inputs, max_new_tokens=max_new_tokens
+                )
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids) :]
+                    for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                ]
+                result = self.processor.batch_decode(
+                    generated_ids_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                    temperature=temperature,
+                )
+            except Exception as e:
+                return (f"Error during model inference: {str(e)}",)
 
             if not keep_model_loaded:
-                del self.processor 
-                del self.model  
-                self.processor = None 
-                self.model = None 
-                torch.cuda.empty_cache() 
+                del self.processor
+                del self.model
+                self.processor = None
+                self.model = None
+                torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
             return result
@@ -212,7 +230,7 @@ class Qwen2:
                         "Qwen2.5-3B-Instruct",
                         "Qwen2.5-7B-Instruct",
                         "Qwen2.5-14B-Instruct",
-                        "Qwen2.5-32B-Instruct"
+                        "Qwen2.5-32B-Instruct",
                     ],
                     {"default": "Qwen2.5-7B-Instruct"},
                 ),
@@ -248,6 +266,9 @@ class Qwen2:
         max_new_tokens,
         seed,
     ):
+        if not prompt.strip():
+            return ("Error: Prompt input is empty.",)
+
         if seed != -1:
             torch.manual_seed(seed)
         model_id = f"qwen/{model}"
@@ -291,7 +312,7 @@ class Qwen2:
         with torch.no_grad():
             messages = [
                 {"role": "system", "content": system},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ]
 
             text = self.tokenizer.apply_chat_template(
