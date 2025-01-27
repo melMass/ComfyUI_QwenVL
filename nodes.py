@@ -1,7 +1,6 @@
 import os
 import torch
 from transformers import (
-    Qwen2_VLForConditionalGeneration,
     Qwen2_5_VLForConditionalGeneration,
     AutoModelForCausalLM,
     AutoTokenizer,
