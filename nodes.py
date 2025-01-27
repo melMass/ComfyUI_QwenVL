@@ -1,7 +1,7 @@
 import os
 import torch
 from transformers import (
-    Qwen2VLForConditionalGeneration,
+    Qwen2_5_VLForConditionalGeneration,
     AutoModelForCausalLM,
     AutoTokenizer,
     AutoProcessor,
@@ -126,7 +126,7 @@ class Qwen2VL:
             else:
                 quantization_config = None
 
-            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_checkpoint,
                 torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
                 device_map="auto",
