@@ -1,5 +1,8 @@
 
 # ComfyUI Qwen2-VL wrapper
+## Update
+qwen2vl node is renamed to qwen2.5vl
+
 
 ## Sample workflow
 You can find a sample [workflow](workflow/Qwen2VL.json) here.
