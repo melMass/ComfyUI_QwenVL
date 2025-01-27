@@ -1,7 +1,7 @@
 
-# ComfyUI Qwen2-VL wrapper
+# ComfyUI Qwen2.5VL and Qwen2.5 wrapper
 ## Update
-qwen2vl node is renamed to qwen2.5vl
+Qwen2VL node is renamed to Qwen2.5VL due to the release of new Qwen models
 
 
 ## Sample workflow
