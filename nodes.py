@@ -41,10 +41,12 @@ class Qwen2VL:
                 "text": ("STRING", {"default": "", "multiline": True}),
                 "model": (
                     [
+                        "Qwen2.5-VL-3B-Instruct",
+                        "Qwen2.5-VL-7B-Instruct",
                         "Qwen2-VL-2B-Instruct",
                         "Qwen2-VL-7B-Instruct",
                     ],
-                    {"default": "Qwen2-VL-7B-Instruct"},
+                    {"default": "Qwen2.5-VL-3B-Instruct"},
                 ),
                 "quantization": (
                     ["none", "4bit", "8bit"],
