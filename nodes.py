@@ -11,6 +11,8 @@ from qwen_vl_utils import process_vision_info
 from PIL import Image
 import numpy as np
 import folder_paths
+import subprocess
+import uuid
 
 
 def tensor_to_pil(image_tensor, batch_index=0) -> Image:
@@ -49,7 +51,7 @@ class Qwen2VL:
                 "quantization": (
                     ["none", "4bit", "8bit"],
                     {"default": "none"},
-                ),  # add quantization type selection
+                ),
                 "keep_model_loaded": ("BOOLEAN", {"default": False}),
                 "temperature": (
                     "FLOAT",
@@ -59,10 +61,11 @@ class Qwen2VL:
                     "INT",
                     {"default": 512, "min": 128, "max": 2048, "step": 1},
                 ),
-                "seed": ("INT", {"default": -1}),  # add seed parameter, default is -1
+                "seed": ("INT", {"default": -1}),
             },
             "optional": {
                 "image": ("IMAGE",),
+                "video_path": ("STRING", {"default": ""}),
             },
         }
 
@@ -80,6 +83,7 @@ class Qwen2VL:
         max_new_tokens,
         seed,
         image=None,
+        video_path=None,
     ):
         if seed != -1:
             torch.manual_seed(seed)
@@ -132,50 +136,66 @@ class Qwen2VL:
             )
 
         with torch.no_grad():
-            if torch.is_tensor(image):
-                pil_image = tensor_to_pil(image)
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text},
+                    ],
+                }
+            ]
 
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "image": pil_image,
-                            },
-                            {"type": "text", "text": text},
-                        ],
-                    }
+            if video_path:
+                print("deal video_path", video_path)
+                # 使用FFmpeg处理视频
+                unique_id = uuid.uuid4().hex  # 生成唯一标识符
+                processed_video_path = f"/tmp/processed_video_{unique_id}.mp4"  # 临时文件路径
+                ffmpeg_command = [
+                    "ffmpeg",
+                    "-i", video_path,
+                    "-vf", "fps=1,scale='min(256,iw)':min'(256,ih)':force_original_aspect_ratio=decrease",
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "18",
+                    processed_video_path
                 ]
+                subprocess.run(ffmpeg_command, check=True)
+
+                # 添加处理后的视频信息到消息
+                messages[0]["content"].insert(0, {
+                    "type": "video",
+                    "video": processed_video_path,
+                })
+
+            # 处理图像输入
             else:
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": text},
-                        ],
-                    }
-                ]
+                print("deal image")
+                pil_image = tensor_to_pil(image)
+                messages[0]["content"].insert(0, {
+                    "type": "image",
+                    "image": pil_image,
+                })
 
+            # 准备输入
             text = self.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            image_inputs, video_inputs = process_vision_info(messages)
+            print("deal messages", messages)
+            image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
             inputs = self.processor(
                 text=[text],
                 images=image_inputs,
                 videos=video_inputs,
                 padding=True,
                 return_tensors="pt",
+                **video_kwargs,
             ).to("cuda")
 
+            # 推理
             try:
-                generated_ids = self.model.generate(
-                    **inputs, max_new_tokens=max_new_tokens
-                )
+                generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
                 generated_ids_trimmed = [
-                    out_ids[len(in_ids) :]
-                    for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
                 ]
                 result = self.processor.batch_decode(
                     generated_ids_trimmed,
@@ -193,6 +213,10 @@ class Qwen2VL:
                 self.model = None
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
+
+            # 删除临时视频文件
+            if video_path:
+                os.remove(processed_video_path)
 
             return result
 
