@@ -181,14 +181,13 @@ class Qwen2VL:
                 messages, tokenize=False, add_generation_prompt=True
             )
             print("deal messages", messages)
-            image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+            image_inputs, video_inputs, video_kwargs = process_vision_info(messages)
             inputs = self.processor(
                 text=[text],
                 images=image_inputs,
                 videos=video_inputs,
                 padding=True,
                 return_tensors="pt",
-                **video_kwargs,
             ).to("cuda")
 
             # 推理
