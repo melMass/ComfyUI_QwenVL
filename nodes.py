@@ -181,7 +181,7 @@ class Qwen2VL:
                 messages, tokenize=False, add_generation_prompt=True
             )
             print("deal messages", messages)
-            image_inputs, video_inputs, video_kwargs = process_vision_info(messages)
+            image_inputs, video_inputs = process_vision_info(messages)
             inputs = self.processor(
                 text=[text],
                 images=image_inputs,
