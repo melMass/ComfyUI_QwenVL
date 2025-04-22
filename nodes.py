@@ -45,6 +45,7 @@ class Qwen2VL:
                     [
                         "Qwen2.5-VL-3B-Instruct",
                         "Qwen2.5-VL-7B-Instruct",
+                        "SkyCaptioner-V1",
                     ],
                     {"default": "Qwen2.5-VL-3B-Instruct"},
                 ),
@@ -87,7 +88,11 @@ class Qwen2VL:
     ):
         if seed != -1:
             torch.manual_seed(seed)
-        model_id = f"qwen/{model}"
+
+        if model.startswith("Qwen"):
+            model_id = f"qwen/{model}"
+        else:
+            model_id = f"Skywork/{model}"
         # put downloaded model to model/LLM dir
         self.model_checkpoint = os.path.join(
             folder_paths.models_dir, "LLM", os.path.basename(model_id)
