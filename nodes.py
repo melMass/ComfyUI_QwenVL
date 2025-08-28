@@ -86,8 +86,13 @@ class Qwen2VL:
         image=None,
         video_path=None,
     ):
+        generator = None
+
+
         if seed != -1:
             torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
 
         if model.startswith("Qwen"):
             model_id = f"qwen/{model}"
@@ -193,11 +198,11 @@ class Qwen2VL:
                 videos=video_inputs,
                 padding=True,
                 return_tensors="pt",
-            ).to("cuda")
+            ).to(self.device)
 
             # 推理
             try:
-                generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+                generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens,do_sample=True, temperature=temperature)
                 generated_ids_trimmed = [
                     out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
                 ]
@@ -205,7 +210,6 @@ class Qwen2VL:
                     generated_ids_trimmed,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,
-                    temperature=temperature,
                 )
             except Exception as e:
                 return (f"Error during model inference: {str(e)}",)
