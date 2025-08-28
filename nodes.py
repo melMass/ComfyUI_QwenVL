@@ -1,5 +1,6 @@
 import os
 import torch
+import copy
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     AutoModelForCausalLM,
@@ -62,15 +63,24 @@ class Qwen2VL:
                     "INT",
                     {"default": 512, "min": 128, "max": 2048, "step": 1},
                 ),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 16, "step": 1}),
                 "seed": ("INT", {"default": -1}),
             },
             "optional": {
+                "output_mode": (
+                    (
+                        "string",
+                        "batch",
+                    ),
+                    {"default": "batch"},
+                ),
                 "image": ("IMAGE",),
                 "video_path": ("STRING", {"default": ""}),
             },
         }
 
-    RETURN_TYPES = ("STRING",)
+    RETURN_TYPES = ("STRING", "STRING")
+    OUTPUT_IS_LIST = (False, True)
     FUNCTION = "inference"
     CATEGORY = "Comfyui_QwenVL"
 
@@ -82,12 +92,13 @@ class Qwen2VL:
         keep_model_loaded,
         temperature,
         max_new_tokens,
+        batch_size,
         seed,
+        output_mode="batch",
         image=None,
         video_path=None,
     ):
         generator = None
-
 
         if seed != -1:
             torch.manual_seed(seed)
@@ -116,13 +127,9 @@ class Qwen2VL:
             # Define min_pixels and max_pixels:
             # Images will be resized to maintain their aspect ratio
             # within the range of min_pixels and max_pixels.
-            min_pixels = 256*28*28
-            max_pixels = 1024*28*28 
 
             self.processor = AutoProcessor.from_pretrained(
                 self.model_checkpoint,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
             )
 
         if self.model is None:
@@ -146,87 +153,107 @@ class Qwen2VL:
             )
 
         with torch.no_grad():
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": text},
-                    ],
-                }
-            ]
+            pil_image = None
+            processed_video_path = None
+
+            user_content = [{"type": "text", "text": text}]
 
             if video_path:
                 print("deal video_path", video_path)
-                # 使用FFmpeg处理视频
-                unique_id = uuid.uuid4().hex  # 生成唯一标识符
-                processed_video_path = f"/tmp/processed_video_{unique_id}.mp4"  # 临时文件路径
+                unique_id = uuid.uuid4().hex
+                processed_video_path = f"/tmp/processed_video_{unique_id}.mp4"
                 ffmpeg_command = [
                     "ffmpeg",
-                    "-i", video_path,
-                    "-vf", "fps=1,scale='min(256,iw)':min'(256,ih)':force_original_aspect_ratio=decrease",
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "18",
-                    processed_video_path
+                    "-i",
+                    video_path,
+                    "-vf",
+                    "fps=1,scale='min(256,iw)':min'(256,ih)':force_original_aspect_ratio=decrease",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "18",
+                    processed_video_path,
                 ]
                 subprocess.run(ffmpeg_command, check=True)
 
-                # 添加处理后的视频信息到消息
-                messages[0]["content"].insert(0, {
-                    "type": "video",
-                    "video": processed_video_path,
-                })
+                user_content.insert(0, {"type": "video", "video": processed_video_path})
 
-            # 处理图像输入
-            else:
+            elif image is not None:
                 print("deal image")
                 pil_image = tensor_to_pil(image)
-                messages[0]["content"].insert(0, {
-                    "type": "image",
-                    "image": pil_image,
-                })
+                user_content.insert(0, {"type": "image", "image": pil_image})
+            text_list = []
+            image_list = []
+
+            for i in range(batch_size):
+                content = [{"type": "text", "text": text}]
+                if pil_image:
+                    content.insert(0, {"type": "image", "image": pil_image})
+                elif processed_video_path:
+                    content.insert(0, {"type": "video", "video": processed_video_path})
+
+                message = [{"role": "user", "content": content}]
+
+                formatted_text = self.processor.apply_chat_template(
+                    message, tokenize=False, add_generation_prompt=True
+                )
+                text_list.append(formatted_text)
+
+                image_list.append(pil_image)
 
             # 准备输入
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            print("deal messages", messages)
-            image_inputs, video_inputs = process_vision_info(messages)
             inputs = self.processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
+                text=text_list,
+                images=image_list if pil_image else None,
                 padding=True,
                 return_tensors="pt",
             ).to(self.device)
 
             # 推理
             try:
-                generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens,do_sample=True, temperature=temperature)
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=temperature,
+                )
                 generated_ids_trimmed = [
-                    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                    out_ids[len(in_ids) :]
+                    for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
                 ]
+
                 result = self.processor.batch_decode(
                     generated_ids_trimmed,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,
                 )
+
+                if output_mode == "string":
+                    final_output = "\n\n---\n\n".join(result)
+
+                else:
+                    final_output = result
+
+                return (final_output, result)
+
             except Exception as e:
-                return (f"Error during model inference: {str(e)}",)
+                raise RuntimeError(
+                    f"Error during model inference: {str(e)}",
+                )
 
-            if not keep_model_loaded:
-                del self.processor
-                del self.model
-                self.processor = None
-                self.model = None
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
+            finally:
+                if not keep_model_loaded:
+                    del self.processor
+                    del self.model
+                    self.processor = None
+                    self.model = None
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
 
-            # 删除临时视频文件
-            if video_path:
-                os.remove(processed_video_path)
-
-            return result
+                if video_path and processed_video_path:
+                    os.remove(processed_video_path)
 
 
 class Qwen2:
