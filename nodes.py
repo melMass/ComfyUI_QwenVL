@@ -1,6 +1,5 @@
 import os
 import torch
-import copy
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     AutoModelForCausalLM,
@@ -8,12 +7,12 @@ from transformers import (
     AutoProcessor,
     BitsAndBytesConfig,
 )
-from qwen_vl_utils import process_vision_info
 from PIL import Image
 import numpy as np
 import folder_paths
 import subprocess
 import uuid
+import comfy.model_management as mm
 
 
 def tensor_to_pil(image_tensor, batch_index=0) -> Image:
@@ -24,11 +23,114 @@ def tensor_to_pil(image_tensor, batch_index=0) -> Image:
     return img
 
 
+MODELS = {
+    "VLM": [
+        "Qwen2.5-VL-3B-Instruct",
+        "Qwen2.5-VL-7B-Instruct",
+        "SkyCaptioner-V1",
+    ],
+    "LLM": [
+        "Qwen2.5-3B-Instruct",
+        "Qwen2.5-7B-Instruct",
+        "Qwen2.5-14B-Instruct",
+        "Qwen2.5-32B-Instruct",
+    ],
+}
+
+
+class QwenLoadLModel:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": (
+                    MODELS["VLM"] + MODELS["LLM"],
+                    {"default": "Qwen2.5-VL-3B-Instruct"},
+                ),
+                # "keep_model_loaded": ("BOOLEAN", {"default": False}),
+                "quantization": (
+                    ["none", "4bit", "8bit"],
+                    {"default": "none"},
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("QWEN2_MODEL",)
+    FUNCTION = "load"
+    CATEGORY = "QwenVL"
+
+
+    @property
+    def device(self):
+        return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+    @property
+    def bf16_support(self):
+        return (
+            torch.cuda.is_available()
+            and torch.cuda.get_device_capability(self.device)[0] >= 8
+        )
+
+    def load(self, model: str, quantization):
+        if model.startswith("Qwen"):
+            model_id = f"qwen/{model}"
+        else:
+            model_id = f"Skywork/{model}"
+
+        IS_VLM = model in MODELS["VLM"]
+
+        model_checkpoint = os.path.join(folder_paths.models_dir, "LLM", model)
+        if not os.path.exists(model_checkpoint):
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                repo_id=model_id,
+                local_dir=model_checkpoint,
+                local_dir_use_symlinks=False,
+            )
+
+        if quantization == "4bit":
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+            )
+        elif quantization == "8bit":
+            quantization_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+            )
+        else:
+            quantization_config = None
+
+        tokenizer = None
+        if IS_VLM:
+            processor = AutoProcessor.from_pretrained(
+                model_checkpoint,
+            )
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_checkpoint,
+                torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
+                device_map="auto",
+                quantization_config=quantization_config,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_checkpoint,
+                torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
+                device_map="auto",
+                quantization_config=quantization_config,
+            )
+            processor = AutoTokenizer.from_pretrained(model_checkpoint)
+
+        # mm.current_loaded_models.append(mm.LoadedModel(model))
+        # mm.current_loaded_models.append(mm.LoadedModel(processor))
+
+        return ((IS_VLM, model, processor),)
+
+
 class Qwen2VL:
     def __init__(self):
-        self.model_checkpoint = None
-        self.processor = None
-        self.model = None
+        # self.model_checkpoint = None
+        # self.processor = None
+        # self.model = None
         self.device = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
@@ -38,23 +140,18 @@ class Qwen2VL:
         )
 
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
-                "text": ("STRING", {"default": "", "multiline": True}),
-                "model": (
-                    [
-                        "Qwen2.5-VL-3B-Instruct",
-                        "Qwen2.5-VL-7B-Instruct",
-                        "SkyCaptioner-V1",
-                    ],
-                    {"default": "Qwen2.5-VL-3B-Instruct"},
+                "model": ("QWEN2_MODEL",),
+                "system": (
+                    "STRING",
+                    {
+                        "default": "You are a helpful assistant.",
+                        "multiline": True,
+                    },
                 ),
-                "quantization": (
-                    ["none", "4bit", "8bit"],
-                    {"default": "none"},
-                ),
-                "keep_model_loaded": ("BOOLEAN", {"default": False}),
+                "user": ("STRING", {"default": "", "multiline": True}),
                 "temperature": (
                     "FLOAT",
                     {"default": 0.7, "min": 0, "max": 1, "step": 0.1},
@@ -82,14 +179,14 @@ class Qwen2VL:
     RETURN_TYPES = ("STRING", "STRING")
     OUTPUT_IS_LIST = (False, True)
     FUNCTION = "inference"
-    CATEGORY = "Comfyui_QwenVL"
+    CATEGORY = "QwenVL"
 
     def inference(
         self,
-        text,
+        user,
+        system,
         model,
-        quantization,
-        keep_model_loaded,
+        # keep_model_loaded,
         temperature,
         max_new_tokens,
         batch_size,
@@ -98,105 +195,73 @@ class Qwen2VL:
         image=None,
         video_path=None,
     ):
-        generator = None
-
         if seed != -1:
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
 
-        if model.startswith("Qwen"):
-            model_id = f"qwen/{model}"
-        else:
-            model_id = f"Skywork/{model}"
-        # put downloaded model to model/LLM dir
-        self.model_checkpoint = os.path.join(
-            folder_paths.models_dir, "LLM", os.path.basename(model_id)
-        )
-
-        if not os.path.exists(self.model_checkpoint):
-            from huggingface_hub import snapshot_download
-
-            snapshot_download(
-                repo_id=model_id,
-                local_dir=self.model_checkpoint,
-                local_dir_use_symlinks=False,
-            )
-
-        if self.processor is None:
-            # Define min_pixels and max_pixels:
-            # Images will be resized to maintain their aspect ratio
-            # within the range of min_pixels and max_pixels.
-
-            self.processor = AutoProcessor.from_pretrained(
-                self.model_checkpoint,
-            )
-
-        if self.model is None:
-            # Load the model on the available device(s)
-            if quantization == "4bit":
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                )
-            elif quantization == "8bit":
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,
-                )
-            else:
-                quantization_config = None
-
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.model_checkpoint,
-                torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
-                device_map="auto",
-                quantization_config=quantization_config,
-            )
+        IS_VLM, qmodel, preprocessor = model
+        if not IS_VLM and not user.strip():
+            raise ValueError("LM models need a prompt")
 
         with torch.no_grad():
             pil_image = None
             processed_video_path = None
 
-            user_content = [{"type": "text", "text": text}]
-
-            if video_path:
-                print("deal video_path", video_path)
-                unique_id = uuid.uuid4().hex
-                processed_video_path = f"/tmp/processed_video_{unique_id}.mp4"
-                ffmpeg_command = [
-                    "ffmpeg",
-                    "-i",
-                    video_path,
-                    "-vf",
-                    "fps=1,scale='min(256,iw)':min'(256,ih)':force_original_aspect_ratio=decrease",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "fast",
-                    "-crf",
-                    "18",
-                    processed_video_path,
-                ]
-                subprocess.run(ffmpeg_command, check=True)
-
-                user_content.insert(0, {"type": "video", "video": processed_video_path})
-
-            elif image is not None:
-                print("deal image")
-                pil_image = tensor_to_pil(image)
-                user_content.insert(0, {"type": "image", "image": pil_image})
+            user_content = [{"type": "text", "text": user}]
             text_list = []
             image_list = []
 
+            if IS_VLM:
+                if video_path:
+                    print("deal video_path", video_path)
+                    unique_id = uuid.uuid4().hex
+                    processed_video_path = f"/tmp/processed_video_{unique_id}.mp4"
+                    ffmpeg_command = [
+                        "ffmpeg",
+                        "-i",
+                        video_path,
+                        "-vf",
+                        "fps=1,scale='min(256,iw)':min'(256,ih)':force_original_aspect_ratio=decrease",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "fast",
+                        "-crf",
+                        "18",
+                        processed_video_path,
+                    ]
+                    subprocess.run(ffmpeg_command, check=True)
+
+                    user_content.insert(
+                        0, {"type": "video", "video": processed_video_path}
+                    )
+
+                elif image is not None:
+                    print("deal image")
+                    pil_image = tensor_to_pil(image)
+                    user_content.insert(0, {"type": "image", "image": pil_image})
+
+            else:
+                pass
+
             for i in range(batch_size):
-                content = [{"type": "text", "text": text}]
-                if pil_image:
-                    content.insert(0, {"type": "image", "image": pil_image})
-                elif processed_video_path:
-                    content.insert(0, {"type": "video", "video": processed_video_path})
+                if IS_VLM:
+                    content = [{"type": "text", "text": user}]
+                    if pil_image:
+                        content.insert(0, {"type": "image", "image": pil_image})
+                    elif processed_video_path:
+                        content.insert(
+                            0, {"type": "video", "video": processed_video_path}
+                        )
+                    message = [{"role": "user", "content": content}]
+                else:
+                    message = [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ]
 
-                message = [{"role": "user", "content": content}]
-
-                formatted_text = self.processor.apply_chat_template(
+                formatted_text = preprocessor.apply_chat_template(
                     message, tokenize=False, add_generation_prompt=True
                 )
                 text_list.append(formatted_text)
@@ -204,7 +269,7 @@ class Qwen2VL:
                 image_list.append(pil_image)
 
             # 准备输入
-            inputs = self.processor(
+            inputs = preprocessor(
                 text=text_list,
                 images=image_list if pil_image else None,
                 padding=True,
@@ -213,7 +278,7 @@ class Qwen2VL:
 
             # 推理
             try:
-                generated_ids = self.model.generate(
+                generated_ids = qmodel.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
                     do_sample=True,
@@ -224,7 +289,7 @@ class Qwen2VL:
                     for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
                 ]
 
-                result = self.processor.batch_decode(
+                result = preprocessor.batch_decode(
                     generated_ids_trimmed,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,
@@ -244,157 +309,11 @@ class Qwen2VL:
                 )
 
             finally:
-                if not keep_model_loaded:
-                    del self.processor
-                    del self.model
-                    self.processor = None
-                    self.model = None
-                    torch.cuda.empty_cache()
-                    torch.cuda.ipc_collect()
+                # if not keep_model_loaded:
+                #     del preprocessor
+                #     del qmodel
+                #     torch.cuda.empty_cache()
+                #     torch.cuda.ipc_collect()
 
                 if video_path and processed_video_path:
                     os.remove(processed_video_path)
-
-
-class Qwen2:
-    def __init__(self):
-        self.model_checkpoint = None
-        self.tokenizer = None
-        self.model = None
-        self.device = (
-            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        )
-        self.bf16_support = (
-            torch.cuda.is_available()
-            and torch.cuda.get_device_capability(self.device)[0] >= 8
-        )
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "system": (
-                    "STRING",
-                    {
-                        "default": "You are a helpful assistant.",
-                        "multiline": True,
-                    },
-                ),
-                "prompt": ("STRING", {"default": "", "multiline": True}),
-                "model": (
-                    [
-                        "Qwen2.5-3B-Instruct",
-                        "Qwen2.5-7B-Instruct",
-                        "Qwen2.5-14B-Instruct",
-                        "Qwen2.5-32B-Instruct",
-                    ],
-                    {"default": "Qwen2.5-7B-Instruct"},
-                ),
-                "quantization": (
-                    ["none", "4bit", "8bit"],
-                    {"default": "none"},
-                ),  # add quantization type selection
-                "keep_model_loaded": ("BOOLEAN", {"default": False}),
-                "temperature": (
-                    "FLOAT",
-                    {"default": 0.7, "min": 0, "max": 1, "step": 0.1},
-                ),
-                "max_new_tokens": (
-                    "INT",
-                    {"default": 512, "min": 128, "max": 2048, "step": 1},
-                ),
-                "seed": ("INT", {"default": -1}),  # add seed parameter, default is -1
-            },
-        }
-
-    RETURN_TYPES = ("STRING",)
-    FUNCTION = "inference"
-    CATEGORY = "Comfyui_QwenVL"
-
-    def inference(
-        self,
-        system,
-        prompt,
-        model,
-        quantization,
-        keep_model_loaded,
-        temperature,
-        max_new_tokens,
-        seed,
-    ):
-        if not prompt.strip():
-            return ("Error: Prompt input is empty.",)
-
-        if seed != -1:
-            torch.manual_seed(seed)
-        model_id = f"qwen/{model}"
-        # put downloaded model to model/LLM dir
-        self.model_checkpoint = os.path.join(
-            folder_paths.models_dir, "LLM", os.path.basename(model_id)
-        )
-
-        if not os.path.exists(self.model_checkpoint):
-            from huggingface_hub import snapshot_download
-
-            snapshot_download(
-                repo_id=model_id,
-                local_dir=self.model_checkpoint,
-                local_dir_use_symlinks=False,
-            )
-
-        if self.tokenizer is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_checkpoint)
-
-        if self.model is None:
-            # Load the model on the available device(s)
-            if quantization == "4bit":
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                )
-            elif quantization == "8bit":
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,
-                )
-            else:
-                quantization_config = None
-
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_checkpoint,
-                torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
-                device_map="auto",
-                quantization_config=quantization_config,
-            )
-
-        with torch.no_grad():
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ]
-
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-
-            inputs = self.tokenizer([text], return_tensors="pt").to("cuda")
-
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-            generated_ids_trimmed = [
-                out_ids[len(in_ids) :]
-                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            result = self.tokenizer.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-                temperature=temperature,
-            )
-
-            if not keep_model_loaded:
-                del self.tokenizer
-                del self.model
-                self.tokenizer = None
-                self.model = None
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-
-            return result
