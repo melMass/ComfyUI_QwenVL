@@ -5,9 +5,22 @@ version = "1.0.0"
 license = { file = "LICENSE" }
 dependencies = ["torch", "torchvision", "numpy", "pillow", "huggingface_hub", "transformers", "bitsandbytes","accelerate","qwen-vl-utils","optimum"]
 
-[project.urls]
-Repository = "https://github.com/alexcong/ComfyUI_QwenVL"
+[tool.pyright]
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportExplicitAny = false
+typeCheckingMode = "basic"
+pythonVersion = "3.11"
+extraPaths = ["python", "../..", "../ComfyUI-Impact-Pack/modules"]
 
-[tool.comfy]
-PublisherId = "alexcong"
-DisplayName = "ComfyUI_QwenVL"
+[tool.ruff.lint]
+select = ["A", "B", "C", "D", "E", "F", "FBT", "I", "N", "S", "SIM", "UP", "W"]
+# NOTE:
+# D102 - undocumented-public-method (noisy)
+# D103 - undocumented-public-function (noisy)
+# D100 - undocumented-public-module (noisy)
+# D101 - undocumented-public-class (kept for DESCRIPTION definitions)
+# N801 - classname should use CapWord (forced by mtb registration (for now))
+# N802 - invalid-function-name (forced by comfy's arch)
+ignore = ["D103", "D102", "D100", "N801", "N802"]
+

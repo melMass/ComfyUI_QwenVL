@@ -5,6 +5,8 @@ pillow
 huggingface_hub
 accelerate
 qwen-vl-utils
+qwen-omni-utils[decord]
 bitsandbytes
 optimum
+soundfile
 git+https://github.com/huggingface/transformers
